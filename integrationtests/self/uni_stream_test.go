@@ -1,108 +1,106 @@
 package self_test
 
 import (
-	"crypto/tls"
 	"fmt"
-	"io"
 	"io/ioutil"
+	"net"
 	"sync"
 
-	"github.com/lucas-clemente/quic-go/integrationtests/tools/testserver"
-
 	quic "github.com/lucas-clemente/quic-go"
+	"github.com/lucas-clemente/quic-go/integrationtests/tools/testserver"
+	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/testdata"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("Bidirectional streams", func() {
-	var server quic.Listener
-	const numStreams = 300
+var _ = Describe("Unidirectional Streams", func() {
+	const numStreams = 1000
+
+	var (
+		server     quic.Listener
+		serverAddr string
+		qconf      *quic.Config
+	)
 
 	BeforeEach(func() {
 		var err error
-		server, err = quic.ListenAddr("localhost:0", testdata.GetTLSConfig(), nil)
+		qconf = &quic.Config{Versions: []protocol.VersionNumber{protocol.VersionTLS}}
+		server, err = quic.ListenAddr("localhost:0", testdata.GetTLSConfig(), qconf)
 		Expect(err).ToNot(HaveOccurred())
+		serverAddr = fmt.Sprintf("quic.clemente.io:%d", server.Addr().(*net.UDPAddr).Port)
 	})
 
 	AfterEach(func() {
 		server.Close()
 	})
 
+	dataForStream := func(id protocol.StreamID) []byte {
+		return testserver.GeneratePRData(10 * int(id))
+	}
+
 	runSendingPeer := func(sess quic.Session) {
-		var wg sync.WaitGroup
-		wg.Add(numStreams)
 		for i := 0; i < numStreams; i++ {
-			str, err := sess.OpenStreamSync()
+			str, err := sess.OpenUniStreamSync()
 			Expect(err).ToNot(HaveOccurred())
-			data := testserver.GeneratePRData(25 * i)
 			go func() {
 				defer GinkgoRecover()
-				_, err := str.Write(data)
+				_, err := str.Write(dataForStream(str.StreamID()))
 				Expect(err).ToNot(HaveOccurred())
 				Expect(str.Close()).To(Succeed())
 			}()
-			go func() {
-				defer GinkgoRecover()
-				defer wg.Done()
-				dataRead, err := ioutil.ReadAll(str)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(dataRead).To(Equal(data))
-			}()
 		}
-		wg.Wait()
 	}
 
 	runReceivingPeer := func(sess quic.Session) {
 		var wg sync.WaitGroup
 		wg.Add(numStreams)
 		for i := 0; i < numStreams; i++ {
-			str, err := sess.AcceptStream()
+			str, err := sess.AcceptUniStream()
 			Expect(err).ToNot(HaveOccurred())
 			go func() {
 				defer GinkgoRecover()
 				defer wg.Done()
-				_, err := io.Copy(str, str)
+				data, err := ioutil.ReadAll(str)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(str.Close()).To(Succeed())
+				Expect(data).To(Equal(dataForStream(str.StreamID())))
 			}()
 		}
 		wg.Wait()
 	}
 
-	It(fmt.Sprintf("client opening %d streams to a client", numStreams), func() {
-		done := make(chan struct{})
+	It(fmt.Sprintf("client opening %d streams to a server", numStreams), func() {
+		var sess quic.Session
 		go func() {
 			defer GinkgoRecover()
-			sess, err := server.Accept()
+			var err error
+			sess, err = server.Accept()
 			Expect(err).ToNot(HaveOccurred())
 			runReceivingPeer(sess)
-			close(done)
+			sess.Close(nil)
 		}()
 
-		client, err := quic.DialAddr(server.Addr().String(), &tls.Config{InsecureSkipVerify: true}, nil)
+		client, err := quic.DialAddr(serverAddr, nil, qconf)
 		Expect(err).ToNot(HaveOccurred())
 		runSendingPeer(client)
-		<-done
+		<-client.Context().Done()
 	})
 
 	It(fmt.Sprintf("server opening %d streams to a client", numStreams), func() {
-		done := make(chan struct{})
 		go func() {
 			defer GinkgoRecover()
 			sess, err := server.Accept()
 			Expect(err).ToNot(HaveOccurred())
 			runSendingPeer(sess)
-			close(done)
 		}()
 
-		client, err := quic.DialAddr(server.Addr().String(), &tls.Config{InsecureSkipVerify: true}, nil)
+		client, err := quic.DialAddr(serverAddr, nil, qconf)
 		Expect(err).ToNot(HaveOccurred())
 		runReceivingPeer(client)
-		<-done
 	})
 
-	It(fmt.Sprintf("client and server opening %d each and sending data to the peer", numStreams), func() {
+	It(fmt.Sprintf("client and server opening %d streams each and sending data to the peer", numStreams), func() {
 		done1 := make(chan struct{})
 		go func() {
 			defer GinkgoRecover()
@@ -119,7 +117,7 @@ var _ = Describe("Bidirectional streams", func() {
 			close(done1)
 		}()
 
-		client, err := quic.DialAddr(server.Addr().String(), &tls.Config{InsecureSkipVerify: true}, nil)
+		client, err := quic.DialAddr(serverAddr, nil, qconf)
 		Expect(err).ToNot(HaveOccurred())
 		done2 := make(chan struct{})
 		go func() {
