@@ -862,6 +862,7 @@ func (s *session) sendPackedPacket(packet *packedPacket) error {
 	defer putPacketBuffer(packet.raw)
 	err := s.sentPacketHandler.SentPacket(&ackhandler.Packet{
 		PacketNumber:    packet.header.PacketNumber,
+		PacketType:      packet.header.Type,
 		Frames:          packet.frames,
 		Length:          protocol.ByteCount(len(packet.raw)),
 		EncryptionLevel: packet.encryptionLevel,
